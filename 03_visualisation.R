@@ -26,7 +26,7 @@ library(sf)
 library(scales)
 
 # Load all analytical objects from 01_exploratory.R
-data_path <- file.path(output_folder, "data")
+data_path <- file.path("data")
 
 standards_base                               <- readRDS(file.path(data_path, "standards_base.rds"))
 standards_subject_trends                     <- readRDS(file.path(data_path, "standards_subject_trends.rds"))

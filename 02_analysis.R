@@ -23,11 +23,15 @@
 ################################################################################
 
 source("config.R")
+
+# Downloads only if files are missing.
+download_external_data(overwrite = FALSE)
+
 library(tidyverse)
 library(sf)
 
 # Load analytical summaries from 01_exploratory.R
-data_path <- file.path(output_folder, "data")
+data_path <- file.path("data")
 
 lsip_base                <- readRDS(file.path(data_path, "lsip_base.rds"))
 lsip_age_base            <- readRDS(file.path(data_path, "lsip_age_base.rds"))

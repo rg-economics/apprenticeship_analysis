@@ -31,6 +31,9 @@ library(scales)
 
 source("config.R")
 
+# Downloads only if files are missing.
+download_external_data(overwrite = FALSE)
+
 ######################
 # 01 Helper functions
 ######################
@@ -764,7 +767,27 @@ providers_per_standard <- provider_standard_base %>%
     standard_ref = str_extract(std_fwk_name_stcode, "ST[0-9]+|FA[0-9]+")
   )
 
-# 2023/24 starts by standard, from the standards subject dataset
+# 2023/24 starts by standard, from the standards subject dataset.
+#
+# FIX (was: standards_202324_keyed kept one row per std_fwk_name_stcode x
+# apps_level_detailed). Standards delivered at more than one detailed level
+# produced multiple rows sharing the same standard_ref. Because the
+# provider-count join below is already aggregated to one row per
+# standard_ref, that single provider count was then attached to every
+# level-row of a multi-level standard - inflating both the row count used
+# as "number of standards" and the population over which the starts/
+# providers medians (and therefore the quadrant boundaries) were computed.
+#
+# This block now aggregates to one row per standard_ref BEFORE the provider
+# join, so thin_market_base/thin_market_summary/thin_market_funding contain
+# exactly one row per standard.
+#
+# Representative level: per project decision, apps_level_detailed for a
+# multi-level standard is set to whichever level had the most 2023/24 starts
+# (this is what flows into level / level_mix_by_quadrant downstream via the
+# Skills England join). levels_combined retains the full set of levels the
+# standard was delivered at, for transparency - this is NOT used in any
+# grouping or join, it is descriptive only.
 standards_202324_keyed <- standards_subject_base %>%
   filter(
     time_period == 202324,
@@ -778,18 +801,109 @@ standards_202324_keyed <- standards_subject_base %>%
   ) %>%
   mutate(
     standard_ref = str_extract(std_fwk_name_stcode, "ST[0-9]+|FA[0-9]+")
+  ) %>%
+  filter(!is.na(standard_ref)) %>%
+  # One row per standard_ref x apps_level_detailed at this point (pre-fix
+  # shape). Rank levels within each standard by starts so the highest-starts
+  # level can be selected as representative.
+  group_by(standard_ref) %>%
+  arrange(desc(starts), .by_group = TRUE) %>%
+  mutate(
+    levels_combined = paste(sort(unique(apps_level_detailed)), collapse = "; "),
+    n_levels_for_standard = n_distinct(apps_level_detailed)
+  ) %>%
+  summarise(
+    # safe_first_non_missing-style picks: rows are pre-sorted desc(starts),
+    # so the first row per group is the highest-starts level.
+    std_fwk_name_stcode = first(std_fwk_name_stcode),
+    ssa_tier_1 = first(ssa_tier_1),
+    apps_level_detailed = first(apps_level_detailed),
+    levels_combined = first(levels_combined),
+    n_levels_for_standard = first(n_levels_for_standard),
+    starts = sum(starts, na.rm = TRUE),
+    .groups = "drop"
   )
 
+# --- Join-integrity check: confirm standard_ref is now unique --------------
+# This check exists because the bug above was exactly this kind of silent
+# one-to-many join. Any non-zero duplicate count here means the aggregation
+# logic above has not produced a clean standard-level key, and the
+# downstream join will silently re-inflate rows again.
+standards_202324_keyed_duplicate_check <- standards_202324_keyed %>%
+  count(standard_ref, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+if (nrow(standards_202324_keyed_duplicate_check) > 0) {
+  warning(
+    paste0(
+      nrow(standards_202324_keyed_duplicate_check),
+      " standard_ref value(s) still have more than one row in ",
+      "standards_202324_keyed after aggregation. The thin-market quadrant ",
+      "will double-count these standards. Inspect ",
+      "standards_202324_keyed_duplicate_check before proceeding."
+    )
+  )
+}
+
+# Multi-level standards summary, kept for transparency / QA reference.
+# Not used downstream - purely descriptive of how much the fix above
+# changed the underlying population structure.
+standards_multi_level_summary <- standards_202324_keyed %>%
+  summarise(
+    standards = n(),
+    multi_level_standards = sum(n_levels_for_standard > 1),
+    pct_multi_level = round(100 * multi_level_standards / standards, 1)
+  )
+
+standards_multi_level_summary
+
 # Merge starts and provider-footprint data.
-# Missing standard_ref values are removed to avoid many-to-many joins on NA.
-thin_market_base <- standards_202324_keyed %>%
+# Missing standard_ref values are already removed above (pre-aggregation),
+# so no further NA-driven many-to-many risk here on that key.
+#
+# --- Join-integrity check: confirm providers_per_standard is unique on
+# standard_ref before joining, since left_join silently fans out rows if the
+# right-hand side has duplicate keys - which is the same failure mode as the
+# bug being fixed here, just on the other table.
+providers_per_standard_duplicate_check <- providers_per_standard %>%
   filter(!is.na(standard_ref)) %>%
+  count(standard_ref, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+if (nrow(providers_per_standard_duplicate_check) > 0) {
+  warning(
+    paste0(
+      nrow(providers_per_standard_duplicate_check),
+      " standard_ref value(s) in providers_per_standard are non-unique. ",
+      "The left_join below will fan out rows for these standards. Inspect ",
+      "providers_per_standard_duplicate_check before proceeding."
+    )
+  )
+}
+
+n_rows_before_provider_join <- nrow(standards_202324_keyed)
+
+thin_market_base <- standards_202324_keyed %>%
   left_join(
     providers_per_standard %>%
       filter(!is.na(standard_ref)) %>%
       select(standard_ref, providers, leavers, achievers),
     by = "standard_ref"
   )
+
+n_rows_after_provider_join <- nrow(thin_market_base)
+
+if (n_rows_after_provider_join != n_rows_before_provider_join) {
+  warning(
+    paste0(
+      "Row count changed during the provider-count join: ",
+      n_rows_before_provider_join, " rows before, ",
+      n_rows_after_provider_join, " rows after. This means the join is ",
+      "not one-to-one and has fanned out at least one standard_ref. ",
+      "Check providers_per_standard_duplicate_check above."
+    )
+  )
+}
 
 # Check match quality
 thin_market_match_quality <- thin_market_base %>%
@@ -2841,7 +2955,6 @@ historical_starts <- historical_summary %>%
 
 # Clean up temporary objects
 rm(historical_summary)
-
 
 ######################
 # Save analytical objects for downstream scripts
