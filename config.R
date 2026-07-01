@@ -9,8 +9,8 @@
 ######################
 
 colour_primary   <- "#2916E0"
-colour_secondary <- "#5B4CF0"
-colour_accent    <- "#8E84FF"
+colour_secondary <- "#8E84FF"
+colour_accent    <- "#6BB5E8"
 colour_text      <- "#222222"
 colour_panel     <- "#F8F8F8"
 
